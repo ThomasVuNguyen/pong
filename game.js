@@ -79,6 +79,23 @@
     scoreRightEl.textContent = String(State.scoreR);
   }
 
+  function resetPositions() {
+    State.left.x = SETTINGS.paddle.inset;
+    State.left.y = (BASE_H - SETTINGS.paddle.h) / 2;
+    State.left.vy = 0;
+
+    State.right.x = BASE_W - SETTINGS.paddle.inset - SETTINGS.paddle.w;
+    State.right.y = (BASE_H - SETTINGS.paddle.h) / 2;
+    State.right.vy = 0;
+    State.right.targetY = State.right.y;
+
+    State.ball.x = BASE_W / 2;
+    State.ball.y = BASE_H / 2;
+    State.ball.vx = 0;
+    State.ball.vy = 0;
+    State.ball.speed = 0;
+  }
+
   function resetMatch() {
     State.scoreL = 0;
     State.scoreR = 0;
@@ -96,23 +113,6 @@
       ]),
       true,
     );
-  }
-
-  function resetPositions() {
-    State.left.x = SETTINGS.paddle.inset;
-    State.left.y = (BASE_H - SETTINGS.paddle.h) / 2;
-    State.left.vy = 0;
-
-    State.right.x = BASE_W - SETTINGS.paddle.inset - SETTINGS.paddle.w;
-    State.right.y = (BASE_H - SETTINGS.paddle.h) / 2;
-    State.right.vy = 0;
-    State.right.targetY = State.right.y;
-
-    State.ball.x = BASE_W / 2;
-    State.ball.y = BASE_H / 2;
-    State.ball.vx = 0;
-    State.ball.vy = 0;
-    State.ball.speed = 0;
   }
 
   function serve() {
@@ -183,6 +183,53 @@
     }
   }
 
+  function collideWithPaddle(paddle, side) {
+    const p = SETTINGS.paddle;
+    const b = SETTINGS.ball;
+    const ball = State.ball;
+
+    const px = paddle.x;
+    const py = paddle.y;
+    const pw = p.w;
+    const ph = p.h;
+
+    const bx = ball.x;
+    const by = ball.y;
+
+    const hitX = bx + b.r > px && bx - b.r < px + pw;
+    const hitY = by + b.r > py && by - b.r < py + ph;
+    if (!hitX || !hitY) return;
+
+    // Only bounce if ball is moving towards the paddle
+    if (side === -1 && ball.vx >= 0) return;
+    if (side === +1 && ball.vx <= 0) return;
+
+    const center = py + ph / 2;
+    const offset = clamp((by - center) / (ph / 2), -1, 1);
+    const maxBounce = 0.75 * Math.PI;
+    const angle = offset * (maxBounce / 2);
+
+    ball.speed = clamp(
+      ball.speed + SETTINGS.ball.speedUpPerHit,
+      SETTINGS.ball.serveSpeed,
+      SETTINGS.ball.maxSpeed,
+    );
+
+    const away = side === -1 ? +1 : -1;
+
+    // Nudge ball outside paddle to avoid sticking
+    if (side === -1) ball.x = px + pw + b.r;
+    else ball.x = px - b.r;
+
+    ball.vx = Math.cos(angle) * ball.speed * away;
+    ball.vy = Math.sin(angle) * ball.speed;
+
+    // Add a tiny bit of vertical "english" from paddle motion (player only)
+    if (side === -1) ball.vy += paddle.vy * 0.12;
+
+    beep("paddle");
+  }
+
   function step(dt) {
     const p = SETTINGS.paddle;
     const b = SETTINGS.ball;
@@ -203,7 +250,9 @@
     const delta = desired - State.right.y;
     const dead = SETTINGS.ai.deadZone;
     const aiMove =
-      Math.abs(delta) < dead ? 0 : clamp(delta, -SETTINGS.ai.maxSpeed * dt, SETTINGS.ai.maxSpeed * dt);
+      Math.abs(delta) < dead
+        ? 0
+        : clamp(delta, -SETTINGS.ai.maxSpeed * dt, SETTINGS.ai.maxSpeed * dt);
     State.right.y = clamp(State.right.y + aiMove, 0, BASE_H - p.h);
 
     if (!State.running || State.paused || State.gameOver) return;
@@ -230,48 +279,6 @@
     // Scoring
     if (State.ball.x + b.r < 0) finishPoint(+1);
     else if (State.ball.x - b.r > BASE_W) finishPoint(-1);
-  }
-
-  function collideWithPaddle(paddle, side) {
-    const p = SETTINGS.paddle;
-    const b = SETTINGS.ball;
-    const ball = State.ball;
-
-    const px = paddle.x;
-    const py = paddle.y;
-    const pw = p.w;
-    const ph = p.h;
-
-    const bx = ball.x;
-    const by = ball.y;
-
-    const hitX = bx + b.r > px && bx - b.r < px + pw;
-    const hitY = by + b.r > py && by - b.r < py + ph;
-    if (!hitX || !hitY) return;
-
-    // Only bounce if ball is moving towards the paddle
-    if (side === -1 && ball.vx >= 0) return;
-    if (side === +1 && ball.vx <= 0) return;
-
-    const center = py + ph / 2;
-    const offset = clamp((by - center) / (ph / 2), -1, 1);
-    const maxBounce = 0.75 * Math.PI; // up to ~135 degrees spread
-    const angle = offset * (maxBounce / 2);
-
-    ball.speed = clamp(ball.speed + SETTINGS.ball.speedUpPerHit, SETTINGS.ball.serveSpeed, SETTINGS.ball.maxSpeed);
-    const away = side === -1 ? +1 : -1;
-
-    // Nudge ball outside paddle to avoid sticking
-    if (side === -1) ball.x = px + pw + b.r;
-    else ball.x = px - b.r;
-
-    ball.vx = Math.cos(angle) * ball.speed * away;
-    ball.vy = Math.sin(angle) * ball.speed;
-
-    // Add a tiny bit of vertical "english" from paddle motion (player only)
-    if (side === -1) ball.vy += paddle.vy * 0.12;
-
-    beep("paddle");
   }
 
   function draw() {
@@ -302,7 +309,14 @@
     );
 
     // Subtle vignette
-    const grd = ctx.createRadialGradient(BASE_W / 2, BASE_H / 2, 40, BASE_W / 2, BASE_H / 2, BASE_W * 0.78);
+    const grd = ctx.createRadialGradient(
+      BASE_W / 2,
+      BASE_H / 2,
+      40,
+      BASE_W / 2,
+      BASE_H / 2,
+      BASE_W * 0.78,
+    );
     grd.addColorStop(0, "rgba(0,0,0,0)");
     grd.addColorStop(1, "rgba(0,0,0,0.35)");
     ctx.fillStyle = grd;
@@ -322,7 +336,6 @@
   function beep(kind) {
     const ac = ensureAudio();
     if (!ac) return;
-    // Avoid loudness surprises; keep short and quiet.
     const now = ac.currentTime;
     const o = ac.createOscillator();
     const g = ac.createGain();
@@ -378,7 +391,6 @@
     if (e.code === "KeyP") togglePause();
     if (e.code === "KeyR") resetMatch();
 
-    // First key interaction can resume audio context on some browsers
     const ac = ensureAudio();
     if (ac && ac.state === "suspended") ac.resume().catch(() => {});
   }
@@ -389,7 +401,6 @@
   }
 
   function onPointerDown() {
-    // Click/tap to serve (nice for mobile)
     const ac = ensureAudio();
     if (ac && ac.state === "suspended") ac.resume().catch(() => {});
     if (State.gameOver) return;
@@ -410,5 +421,4 @@
 
   init();
 })();
-
 
