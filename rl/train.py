@@ -276,7 +276,7 @@ def train(args: argparse.Namespace) -> None:
 
     print(
         f"Rollout: n_envs={ppo.n_envs}, n_steps={ppo.n_steps} -> batch={batch_size}\n"
-        f"Training until 90% win rate or cancellation. Epochs/update={ppo.n_epochs}, minibatch={minibatch_size}"
+        f"Training until 100% win rate or cancellation. Epochs/update={ppo.n_epochs}, minibatch={minibatch_size}"
     )
     ep_returns_window: list[float] = []
     ep_lens_window: list[int] = []
@@ -326,7 +326,7 @@ def train(args: argparse.Namespace) -> None:
     start_time = time.time()
     last_update_done = start_update - 1
     update = start_update
-    target_win_rate = 0.9
+    target_win_rate = 1.0  # 100% win rate target
     
     while True:
         if stop_requested:

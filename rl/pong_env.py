@@ -337,10 +337,12 @@ class PongEnv(gym.Env[np.ndarray, int]):
         """
         Returns an RGB frame (H, W, 3) uint8 for videos/viewers.
         Uses randomized field dimensions for accurate visualization.
+        Dimensions are rounded to even numbers for H.264 compatibility.
         """
         cfg = self.cfg
-        w = int(self._ep_width) * scale
-        h = int(self._ep_height) * scale
+        # Round to even numbers for H.264 encoding compatibility
+        w = (int(self._ep_width) * scale) // 2 * 2
+        h = (int(self._ep_height) * scale) // 2 * 2
         img = np.zeros((h, w, 3), dtype=np.uint8)
 
         # Background
@@ -349,7 +351,7 @@ class PongEnv(gym.Env[np.ndarray, int]):
         # Midline dashed
         dash_h = int(16 * scale)
         gap = int(10 * scale)
-        mx = int(self._ep_width * 0.5 * scale)
+        mx = w // 2  # Use rounded width for midline
         for y in range(int(14 * scale), h - int(14 * scale), dash_h + gap):
             img[y : y + dash_h, mx - 2 * scale : mx + 2 * scale] = (130, 150, 190)
 
