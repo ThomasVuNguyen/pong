@@ -39,9 +39,9 @@ class PPOConfig:
     lr: float = 3e-4
 
 
-def make_env(*, seq_len: int, seed: int, idx: int) -> gym.Env:
+def make_env(*, seq_len: int, seed: int, idx: int, ai_difficulty: float = 1.0) -> gym.Env:
     def _thunk():
-        cfg = PongConfig(terminate_on_point=True)
+        cfg = PongConfig(terminate_on_point=True, ai_difficulty=ai_difficulty)
         env = PongEnv(cfg)
         env = HistoryObsWrapper(env, seq_len=seq_len)
         env.reset(seed=seed + idx)
@@ -120,9 +120,10 @@ def evaluate(
     video_path: str | None,
     video_fps: int,
     greedy: bool = False,
+    ai_difficulty: float = 1.0,  # Use full difficulty for evaluation
 ) -> dict:
     device = next(model.parameters()).device
-    env = PongEnv(PongConfig(terminate_on_point=True), render_mode="rgb_array")
+    env = PongEnv(PongConfig(terminate_on_point=True, ai_difficulty=ai_difficulty), render_mode="rgb_array")
     env = HistoryObsWrapper(env, seq_len=model_cfg.seq_len)
 
     rng = np.random.default_rng(seed)
@@ -193,8 +194,19 @@ def train(args: argparse.Namespace) -> None:
         lr=args.lr,
     )
 
+    # Curriculum learning: start at full difficulty (can be adjusted based on win rate if needed)
+    current_ai_difficulty = 1.0  # Start at 100% difficulty
+    difficulty_update_interval = 10  # Update difficulty every N updates
+    
+    # Create envs with initial difficulty (will be updated via curriculum)
+    def _make_envs_with_difficulty(difficulty: float):
+        return [
+            make_env(seq_len=args.seq_len, seed=args.seed, idx=i, ai_difficulty=difficulty)
+            for i in range(ppo.n_envs)
+        ]
+    
     envs = gym.vector.SyncVectorEnv(
-        [make_env(seq_len=args.seq_len, seed=args.seed, idx=i) for i in range(ppo.n_envs)],
+        _make_envs_with_difficulty(current_ai_difficulty),
         # Keep behavior predictable: we will handle resets ourselves.
         **(
             {"autoreset_mode": gym.vector.AutoresetMode.DISABLED}
@@ -476,6 +488,7 @@ def train(args: argparse.Namespace) -> None:
                 video_path=video_path if do_video else None,
                 video_fps=args.video_fps,
                 greedy=getattr(args, "eval_greedy", False),
+                ai_difficulty=1.0,  # Always use full difficulty for evaluation
             )
             
             # Check win rate and break if target reached
@@ -487,6 +500,26 @@ def train(args: argparse.Namespace) -> None:
                         with args._live_shared.lock:
                             args._live_shared.status = f"Training complete: {win_rate:.1%} win rate"
                     break
+                
+                # Curriculum learning: increase difficulty as agent improves
+                # Scale difficulty from 0.3 (easy) to 1.0 (hard) based on win rate
+                if update % difficulty_update_interval == 0:
+                    # Gradually increase difficulty: 0.3 at 0% win rate, 1.0 at 70%+ win rate
+                    new_difficulty = min(1.0, 0.3 + (win_rate / 0.7) * 0.7)
+                    if abs(new_difficulty - current_ai_difficulty) > 0.05:  # Only update if significant change
+                        current_ai_difficulty = new_difficulty
+                        print(f"[rl.train] Curriculum: adjusting opponent difficulty to {current_ai_difficulty:.1%} (win_rate={win_rate:.1%})")
+                        # Recreate environments with new difficulty
+                        envs.close()
+                        envs = gym.vector.SyncVectorEnv(
+                            _make_envs_with_difficulty(current_ai_difficulty),
+                            **(
+                                {"autoreset_mode": gym.vector.AutoresetMode.DISABLED}
+                                if hasattr(gym.vector, "AutoresetMode")
+                                else {}
+                            ),
+                        )
+                        obs, _ = envs.reset(seed=args.seed + update)
 
         # Display win rate in console output if available
         win_rate_str = ""
@@ -603,7 +636,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--log-csv", type=str, default="runs/metrics.csv")
     p.add_argument("--eval-every", type=int, default=5)
     p.add_argument("--eval-episodes", type=int, default=40)
-    p.add_argument("--eval-max-steps", type=int, default=800)
+    p.add_argument("--eval-max-steps", type=int, default=400)
     p.add_argument("--videos-dir", type=str, default="runs/videos")
     p.add_argument("--video-every", type=int, default=20)
     p.add_argument("--video-fps", type=int, default=30)
