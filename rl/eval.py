@@ -22,6 +22,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--ckpt", type=str, default="runs/pong_transformer_200k.pt")
     p.add_argument("--episodes", type=int, default=100)
     p.add_argument("--seed", type=int, default=123)
+    p.add_argument("--greedy", action="store_true", help="Use greedy (argmax) actions (default: sample like training)")
     return p.parse_args()
 
 
@@ -47,7 +48,12 @@ def main() -> None:
             with torch.no_grad():
                 o = torch.from_numpy(obs[None, ...]).to(device)  # (1,T,D)
                 logits, _ = model(o)
-                act = int(torch.argmax(logits, dim=-1).item())
+                if args.greedy:
+                    act = int(torch.argmax(logits, dim=-1).item())
+                else:
+                    # Sample from policy distribution (matches training behavior)
+                    dist = Categorical(logits=logits)
+                    act = int(dist.sample().item())
             obs, r, term, trunc, _ = env.step(act)
             done = term or trunc
             ep_ret += float(r)

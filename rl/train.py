@@ -119,6 +119,7 @@ def evaluate(
     max_steps: int,
     video_path: str | None,
     video_fps: int,
+    greedy: bool = False,
 ) -> dict:
     device = next(model.parameters()).device
     env = PongEnv(PongConfig(terminate_on_point=True), render_mode="rgb_array")
@@ -139,7 +140,12 @@ def evaluate(
             with torch.no_grad():
                 o = torch.from_numpy(obs[None, ...]).to(device)
                 logits, _ = model(o)
-                act = int(torch.argmax(logits, dim=-1).item())
+                if greedy:
+                    act = int(torch.argmax(logits, dim=-1).item())
+                else:
+                    # Sample from policy distribution (matches training behavior)
+                    dist = Categorical(logits=logits)
+                    act = int(dist.sample().item())
             obs, r, term, trunc, info = env.step(act)
             done = term or trunc
             ep_ret += float(r)
@@ -155,9 +161,14 @@ def evaluate(
     if video_path is not None and frames:
         try:
             write_mp4(video_path, frames, fps=video_fps)
-        except RuntimeError:
-            # Missing imageio/ffmpeg should not crash training.
+            print(f"[rl.train] Wrote video: {video_path}")
+        except Exception as e:
+            # Don't crash training if video writing fails, but warn the user.
+            print(f"[rl.train] Failed to write video {video_path}: {type(e).__name__}: {e}")
             video_path = None
+    elif video_path is not None:
+        print(f"[rl.train] No frames collected for video {video_path}")
+        video_path = None
 
     env.close()
     model.train()
@@ -250,11 +261,10 @@ def train(args: argparse.Namespace) -> None:
 
     batch_size = ppo.n_envs * ppo.n_steps
     minibatch_size = batch_size // ppo.n_minibatches
-    n_updates = ppo.total_steps // batch_size
 
     print(
         f"Rollout: n_envs={ppo.n_envs}, n_steps={ppo.n_steps} -> batch={batch_size}\n"
-        f"Updates: {n_updates}, epochs/update={ppo.n_epochs}, minibatch={minibatch_size}"
+        f"Training until 90% win rate or cancellation. Epochs/update={ppo.n_epochs}, minibatch={minibatch_size}"
     )
     ep_returns_window: list[float] = []
     ep_lens_window: list[int] = []
@@ -303,7 +313,10 @@ def train(args: argparse.Namespace) -> None:
 
     start_time = time.time()
     last_update_done = start_update - 1
-    for update in range(start_update, n_updates + 1):
+    update = start_update
+    target_win_rate = 0.9
+    
+    while True:
         if stop_requested:
             break
         if args._stop_event is not None and args._stop_event.is_set():
@@ -447,16 +460,13 @@ def train(args: argparse.Namespace) -> None:
         mean_v = float(np.mean(v_losses)) if v_losses else 0.0
         mean_ent = float(np.mean(entropies)) if entropies else 0.0
 
-        print(
-            f"update {update:4d}/{n_updates} | step {global_step:9d} | sps {sps:5d} | "
-            f"ep_ret {mean_ret:6.3f} | ep_len {mean_len:6.1f} | kl {mean_kl:7.5f} | clip {mean_clip:5.3f}"
-        )
-
         eval_stats = {}
         video_path = ""
-        if args.eval_every > 0 and (update % args.eval_every == 0 or update == n_updates):
-            do_video = args.video_every > 0 and (update % args.video_every == 0 or update == n_updates)
-            video_path = os.path.join(args.videos_dir, f"eval_update_{update:05d}.mp4") if do_video else ""
+        if args.eval_every > 0 and (update % args.eval_every == 0):
+            do_video = args.video_every > 0 and (update % args.video_every == 0)
+            if do_video:
+                video_path = os.path.join(args.videos_dir, f"eval_update_{update:05d}.mp4")
+                print(f"[rl.train] Writing video at update {update}: {video_path}")
             eval_stats = evaluate(
                 model=model,
                 model_cfg=model_cfg,
@@ -465,7 +475,29 @@ def train(args: argparse.Namespace) -> None:
                 max_steps=args.eval_max_steps,
                 video_path=video_path if do_video else None,
                 video_fps=args.video_fps,
+                greedy=getattr(args, "eval_greedy", False),
             )
+            
+            # Check win rate and break if target reached
+            if "eval_win_rate" in eval_stats:
+                win_rate = eval_stats["eval_win_rate"]
+                if win_rate >= target_win_rate:
+                    print(f"\n[rl.train] Target win rate ({target_win_rate:.0%}) reached! Win rate: {win_rate:.1%}")
+                    if args._live_shared is not None:
+                        with args._live_shared.lock:
+                            args._live_shared.status = f"Training complete: {win_rate:.1%} win rate"
+                    break
+
+        # Display win rate in console output if available
+        win_rate_str = ""
+        if "eval_win_rate" in eval_stats:
+            win_rate = eval_stats["eval_win_rate"]
+            win_rate_str = f" | win_rate {win_rate:.1%}"
+        
+        print(
+            f"update {update:6d} | step {global_step:9d} | sps {sps:5d} | "
+            f"ep_ret {mean_ret:6.3f} | ep_len {mean_len:6.1f} | kl {mean_kl:7.5f} | clip {mean_clip:5.3f}{win_rate_str}"
+        )
 
         if csv is not None:
             csv.log(
@@ -488,7 +520,7 @@ def train(args: argparse.Namespace) -> None:
 
         # Stream weights + metrics to live UI
         if args._live_shared is not None and args.ui_model_every > 0:
-            if update % args.ui_model_every == 0 or update == n_updates:
+            if update % args.ui_model_every == 0:
                 # Copy small state_dict safely for UI thread
                 sd = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
                 with args._live_shared.lock:
@@ -504,7 +536,7 @@ def train(args: argparse.Namespace) -> None:
                         args._live_shared.eval_win_rate = float(eval_stats.get("eval_win_rate", float("nan")))
                     args._live_shared.status = "Training..."
 
-        if args.save_path and (update % args.save_every == 0 or update == n_updates):
+        if args.save_path and (update % args.save_every == 0):
             os.makedirs(os.path.dirname(args.save_path), exist_ok=True)
             torch.save(
                 {
@@ -518,6 +550,7 @@ def train(args: argparse.Namespace) -> None:
                 args.save_path,
             )
         last_update_done = update
+        update += 1
 
     envs.close()
     if csv is not None:
@@ -574,6 +607,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--videos-dir", type=str, default="runs/videos")
     p.add_argument("--video-every", type=int, default=20)
     p.add_argument("--video-fps", type=int, default=30)
+    p.add_argument("--eval-greedy", action="store_true", help="Use greedy (argmax) actions in evaluation/videos (default: sample like training)")
 
     # Live UI (enabled by default; disable for headless runs)
     p.add_argument("--no-ui", action="store_true", help="Disable realtime UI window")
