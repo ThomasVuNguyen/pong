@@ -13,6 +13,7 @@ import torch.nn as nn
 from torch.distributions.categorical import Categorical
 
 from .live_ui import LiveShared, LiveTrainingUI
+from .web_ui import WebTrainingUI
 from .logger import CsvLogger
 from .model import TransformerACConfig, TransformerActorCritic
 from .pong_env import PongConfig, PongEnv
@@ -649,6 +650,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--ui-model-every", type=int, default=1, help="Push weights to UI every N updates")
     p.add_argument("--ui-greedy", action="store_true", help="Use argmax actions in the UI (default: sample)")
 
+    # Web UI args
+    p.add_argument("--web-ui", action="store_true", help="Use Web UI instead of Tkinter")
+    p.add_argument("--port", type=int, default=1306, help="Port for Web UI")
+
     return p.parse_args()
 
 
@@ -664,8 +669,15 @@ if __name__ == "__main__":
     if args.no_ui:
         train(args)
     else:
+        # Auto-detect if we should default to web UI (headless env)
+        use_web = args.web_ui
+        if not use_web and os.environ.get("DISPLAY") is None:
+            print("[rl.train] No DISPLAY detected. Defaulting to Web UI.")
+            use_web = True
+
         # Try to start UI; if Tk isn't available, fall back to headless training.
         try:
+            # Derive obs/action dims from a single env
             # Derive obs/action dims from a single env
             tmp = PongEnv(PongConfig(terminate_on_point=True))
             tmp = HistoryObsWrapper(tmp, seq_len=args.seq_len)
@@ -705,8 +717,14 @@ if __name__ == "__main__":
             t = threading.Thread(target=_trainer, daemon=True)
             t.start()
 
-            ui = LiveTrainingUI(shared, fps=args.ui_fps, scale=args.ui_scale, greedy=args.ui_greedy)
-            ui.run()
+            if use_web:
+                # Web UI mode
+                ui = WebTrainingUI(shared, port=args.port, fps=args.ui_fps, scale=args.ui_scale, greedy=args.ui_greedy)
+                ui.run()
+            else:
+                # Desktop Tk mode
+                ui = LiveTrainingUI(shared, fps=args.ui_fps, scale=args.ui_scale, greedy=args.ui_greedy)
+                ui.run()
         except Exception as e:
             print(f"[rl.train] Live UI unavailable ({type(e).__name__}: {e}). Running headless.")
             train(args)

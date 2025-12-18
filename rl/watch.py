@@ -10,6 +10,7 @@ import torch
 
 from .model import TransformerACConfig, TransformerActorCritic
 from .pong_env import PongConfig, PongEnv
+from .web_ui import WebTrainingUI
 from .wrappers import HistoryObsWrapper
 
 
@@ -20,6 +21,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--scale", type=int, default=1, help="Render scaling factor")
     p.add_argument("--fps", type=int, default=60)
     p.add_argument("--seed", type=int, default=123)
+    p.add_argument("--web-ui", action="store_true", help="Use Web UI instead of Tkinter")
+    p.add_argument("--port", type=int, default=1306, help="Port for Web UI")
     return p.parse_args()
 
 
@@ -40,15 +43,29 @@ class Watcher:
         self.rng = np.random.default_rng(args.seed)
         self.last_reload = 0.0
 
-        self.root = tk.Tk()
-        self.root.title("Pong RL Watch (auto-reload checkpoint)")
+        self.last_reload = 0.0
 
-        # Placeholder size; will resize on first frame
-        self.canvas = tk.Canvas(self.root, width=800 * args.scale, height=450 * args.scale, highlightthickness=0)
-        self.canvas.pack()
+        if not args.web_ui:
+            self.root = tk.Tk()
+            self.root.title("Pong RL Watch (auto-reload checkpoint)")
 
-        self._photo = None
-        self._img_id = None
+            # Placeholder size; will resize on first frame
+            self.canvas = tk.Canvas(self.root, width=800 * args.scale, height=450 * args.scale, highlightthickness=0)
+            self.canvas.pack()
+
+            self._photo = None
+            self._img_id = None
+        else:
+            self.web_ui = WebTrainingUI(
+                shared=None,
+                port=args.port,
+                fps=args.fps,
+                scale=args.scale,
+                seed=args.seed,
+                model=self.model,
+                env=self.env,
+            )
+            pass
 
     def _load_if_updated(self) -> None:
         now = time.time()
@@ -87,6 +104,28 @@ class Watcher:
             return int(torch.argmax(logits, dim=-1).item())
 
     def _draw(self) -> None:
+        if self.args.web_ui:
+            # Push frame to web UI buffer
+            # We must access the private env logic or refactor.
+            # But wait, self.web_ui has its own env if we are not careful.
+            # In 'train' mode, WebTrainingUI owns the env step loop.
+            # In 'watch' mode, we want Watcher to own the step loop (to handle reloads etc)
+            # and just use WebUI for rendering.
+            
+            # Use the method on WebTrainingUI that renders to buffer
+            # We need to hack it slightly to use OUR env.
+            # Actually, let's just do it manually here to avoid complex refactor.
+            from PIL import Image
+            import io
+            from .web_ui import OUTPUT
+            
+            frame = self.env.render_rgb(scale=self.args.scale)
+            img = Image.fromarray(frame)
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=80)
+            OUTPUT.set_frame(buf.getvalue())
+            return
+            
         frame = self.env.render_rgb(scale=self.args.scale)
 
         # Tk expects a PhotoImage; the most reliable no-deps path is PPM.
@@ -120,8 +159,34 @@ class Watcher:
         self.root.after(delay_ms, self.tick)
 
     def run(self) -> None:
-        self.root.after(1, self.tick)
-        self.root.mainloop()
+        if self.args.web_ui:
+            # Create server ONLY (not full WebTrainingUI loop, as we want to drive it)
+            # Actually, reusing WebTrainingUI just for the server part is cleaner but 
+            # we need to start the thread.
+            # Let's manually start the server logic here to keep Watcher independent.
+            from .web_ui import ThreadingHTTPServer, StreamingHandler
+            import threading
+            
+            server = ThreadingHTTPServer(("0.0.0.0", self.args.port), StreamingHandler)
+            t = threading.Thread(target=server.serve_forever, daemon=True)
+            t.start()
+            print(f"[Watcher] Web server started at http://localhost:{self.args.port}")
+            
+            try:
+                # Custom loop for web mode
+                while True:
+                    start_t = time.time()
+                    self.tick()
+                    
+                    # Manual sleep to match FPS
+                    elapsed = time.time() - start_t
+                    delay = max(0, (1.0 / self.args.fps) - elapsed)
+                    time.sleep(delay)
+            except KeyboardInterrupt:
+                pass
+        else:
+            self.root.after(1, self.tick)
+            self.root.mainloop()
 
 
 def main() -> None:
