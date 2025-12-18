@@ -54,7 +54,7 @@ Design decisions
 ### Setup (always use `venv/`)
 
 ```bash
-cd /Users/tungnguyen/Documents/GitHub/pong
+# Setup virtual environment
 python3 -m venv venv
 source venv/bin/activate
 python -m pip install --upgrade pip
@@ -75,13 +75,24 @@ Default config is ~200k params (around ~201k).
 
 ### Train (PPO)
 
-```bash
 python -m rl.train
 ```
 
 By default this **opens a realtime UI window** (and trains at the same time). It also writes a checkpoint to `runs/pong_transformer_200k.pt`.
 
-To disable the UI (headless training):
+**Server / Web UI (Headless Mode)**:
+If you are running on a server (no display) or want to view the training remotely:
+
+```bash
+# Auto-detected if no DISPLAY is present
+python -m rl.train --port 1306
+```
+
+Then open `http://<your-server-ip>:1306` in your browser.
+- **Tailscale**: If using Tailscale, use your Tailscale IP (e.g., `http://100.x.y.z:1306`).
+- **Flags**: Use `--web-ui` to force web mode, `--port` to change the port.
+
+To disable the UI completely:
 
 ```bash
 python -m rl.train --no-ui
@@ -121,4 +132,11 @@ Run training in one terminal and the watcher in another. The watcher **reloads**
 python -m rl.watch --ckpt runs/pong_transformer_200k.pt
 ```
 
-Note: `rl.watch` uses **Tkinter** (usually included with Python). If `import tkinter` fails on your system, you can still observe progress via `runs/metrics.csv` + the MP4s in `runs/videos/`.
+**Web UI Watcher**:
+To watch on a server/remote browser:
+
+```bash
+python -m rl.watch --web-ui --port 1306 --ckpt runs/pong_transformer_200k.pt
+```
+
+Note: `rl.watch` (desktop) uses **Tkinter**. If `import tkinter` fails, use the `--web-ui` flag or `--no-ui` mode.
